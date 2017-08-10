@@ -1,0 +1,253 @@
+#include <jni.h>
+#include <GLES2/gl2.h>
+#include <string.h>
+#include "openglNative.h"
+#include <android/log.h>
+#include <EGL/egl.h>
+
+#define LOG_TAG "OPENGL"
+#define LOGI(...) __android_log_print(ANDROID_LOG_DEBUG, LOG_TAG,__VA_ARGS__)
+
+GLuint program;
+GLuint vertexShader;
+GLuint pixelShader;
+GLint _positionHandle = -1, _coordHandle = -1;
+
+int _width = 0;
+int _height = 0;
+
+const GLchar *VERTEX_SHADER = "attribute vec4 vPosition;\n"
+        "attribute vec2 a_texCoord;\n"
+        "varying vec2 tc;\n"
+        "void main() {\n"
+        "gl_Position = vPosition;\n"
+        "tc = a_texCoord;\n"
+        "}\n";
+
+const GLchar *FRAGMENT_SHADER = "precision mediump float;\n"
+        "uniform sampler2D tex_y;\n"
+        "uniform sampler2D tex_u;\n"
+        "uniform sampler2D tex_v;\n"
+        "varying vec2 tc;\n"
+        "void main() {\n"
+        "vec4 c = vec4((texture2D(tex_y, tc).r - 16./255.) * 1.164);\n"
+        "vec4 U = vec4(texture2D(tex_u, tc).r - 128./255.);\n"
+        "vec4 V = vec4(texture2D(tex_v, tc).r - 128./255.);\n"
+        "c += V * vec4(1.596, -0.813, 0, 0);\n"
+        "c += U * vec4(0, -0.392, 2.017, 0);\n"
+        "c.a = 1.0;\n"
+        "gl_FragColor = c;\n"
+        "}\n";
+
+GLuint _frameBuffer;
+GLuint _renderBuffer;
+
+GLenum _textureI = GL_TEXTURE0;
+GLenum _textureII = GL_TEXTURE1;
+GLenum _textureIII = GL_TEXTURE2;
+GLenum _tIindex = 0;
+GLenum _tIIindex = 1;
+GLenum _tIIIindex = 2;
+
+GLint _yhandle = -1, _uhandle = -1, _vhandle = -1;
+GLuint _ytid = 0, _utid = 0, _vtid = 0;
+
+typedef struct {
+
+    float position[3];
+    float color[4];
+    float texture[2];
+} LLVertex;
+
+const LLVertex Vertex[] = {
+        {{-1, -1, 0}, {0, 0, 0, 1}, {0.0, 0.0}},
+        {{-1, 1,  0}, {0, 0, 1, 1}, {0.0, 1.0}},
+        {{1,  1,  0}, {0, 1, 0, 1}, {1.0, 1.0}},
+        {{1,  -1, 0}, {1, 0, 0, 1}, {1.0, 0.0}}
+};
+
+const GLubyte LLIndices[] = {
+        0, 1, 2,
+        2, 3, 0
+};
+
+void checkGlError(const char *op) {
+    GLint error;
+    for (error = glGetError(); error; error = glGetError()) {
+        LOGI("error::after %s() glError (0x%x)\n", op, error);
+    }
+}
+
+GLuint test::createProgram() {
+    GLuint vertexShader = loadShader(GL_VERTEX_SHADER, VERTEX_SHADER);
+    GLuint pixelShader = loadShader(GL_FRAGMENT_SHADER, FRAGMENT_SHADER);
+    program = glCreateProgram();
+    if (program) {
+        glAttachShader(program, vertexShader);
+        checkGlError("vertexShader");
+        glAttachShader(program, pixelShader);
+        checkGlError("pixelShader");
+        glLinkProgram(program);
+        checkGlError("glLinkProgram");
+        GLint linkStatus = 0;
+        glGetProgramiv(program, GL_LINK_STATUS, &linkStatus);
+        checkGlError("glGetProgramiv");
+        if (!linkStatus) {
+            glDeleteProgram(program);
+            program = 0;
+        }
+    }
+
+    GLuint vertexBuffer;
+    glGenBuffers(1, &vertexBuffer);
+    glBindBuffer(GL_ARRAY_BUFFER, vertexBuffer);
+    glBufferData(GL_ARRAY_BUFFER, sizeof(Vertex), Vertex, GL_STATIC_DRAW);
+
+    GLuint indexBuffer;
+    glGenBuffers(1, &indexBuffer);
+    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, indexBuffer);
+    glBufferData(GL_ELEMENT_ARRAY_BUFFER, sizeof(LLIndices), LLIndices, GL_STATIC_DRAW);
+
+    return program;
+}
+
+GLuint test::loadShader(GLenum shaderType, const GLchar *source) {
+    GLuint shader = glCreateShader(shaderType);
+    if (shader) {
+        int len = strlen(source);
+        glShaderSource(shader, 1, &source, &len);
+        checkGlError("glShaderSource");
+        glCompileShader(shader);
+        checkGlError("glCompileShader");
+        GLint complied = 0;
+        glGetShaderiv(shader, GL_COMPILE_STATUS, &complied);
+        checkGlError("glGetShaderiv");
+        if (complied == GL_FALSE) {
+            glDeleteShader(shader);
+            shader = 0;
+        }
+    }
+    return shader;
+}
+
+EGLContext context;
+
+void test::buildProgram() {
+    context = eglGetCurrentContext();
+
+    if (program <= 0) {
+        program = createProgram();
+    }
+
+    const GLchar *vp = "vPosition";
+    _positionHandle = glGetAttribLocation(program, vp);
+    checkGlError("glGetAttribLocation vPosition");
+    if (_positionHandle == -1) {
+        LOGI("Could not get attribute location for vPosition");
+    }
+    const GLchar *at = "a_texCoord";
+    _coordHandle = glGetAttribLocation(program, at);
+    checkGlError("glGetAttribLocation a_texCoord");
+    if (_coordHandle == -1) {
+        LOGI("Could not get attribute location for a_texCoord");
+    }
+
+    _yhandle = glGetUniformLocation(program, "tex_y");
+    checkGlError("glGetUniformLocation tex_y");
+    if (_yhandle == -1) {
+        LOGI("_yhandle -1");
+    }
+
+    _uhandle = glGetUniformLocation(program, "tex_u");
+    checkGlError("glGetUniformLocation tex_u");
+    if (_uhandle == -1) {
+        LOGI("_uhandle -1");
+    }
+
+    _vhandle = glGetUniformLocation(program, "tex_v");
+    checkGlError("glGetUniformLocation tex_v");
+    if (_vhandle == -1) {
+        LOGI("_vhandle -1");
+    }
+}
+
+void
+test::buildTexture(unsigned char *y, unsigned char *u, unsigned char *v, int width, int height) {
+    if (_ytid == 0) {
+        GLuint y_textures = 0;
+        glGenTextures(1, &y_textures);
+        checkGlError("glGenTextures");
+        _ytid = y_textures;
+    }
+    glBindTexture(GL_TEXTURE_2D, (GLuint) _ytid);
+    checkGlError("glBindTexture");
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_LUMINANCE, width, height, 0, GL_LUMINANCE,
+                 GL_UNSIGNED_BYTE, y);
+    checkGlError("glTexImage2D");
+    glTexParameterf(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    glTexParameterf(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    if (_utid == 0) {
+        GLuint u_textures = 0;
+        glGenTextures(1, &u_textures);
+        checkGlError("glGenTextures");
+        _utid = u_textures;
+    }
+    glBindTexture(GL_TEXTURE_2D, (GLuint) _utid);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_LUMINANCE, width / 2, height / 2, 0,
+                 GL_LUMINANCE,
+                 GL_UNSIGNED_BYTE, u);
+    glTexParameterf(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    glTexParameterf(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    GLuint v_textures = 0;
+    if (_vtid == 0) {
+        glGenTextures(1, &v_textures);
+        checkGlError("glGenTextures");
+        _vtid = v_textures;
+    }
+    glBindTexture(GL_TEXTURE_2D, (GLuint) _vtid);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_LUMINANCE, width / 2, height / 2, 0,
+                 GL_LUMINANCE,
+                 GL_UNSIGNED_BYTE, v);
+    glTexParameterf(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    glTexParameterf(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+}
+
+void test::draw() {
+    glViewport(0, 0, _width, _height);
+    glClearColor(0.0f, 0.0f, 1.0f, 1.0f);
+    glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+
+    glUseProgram(program);
+
+    glVertexAttribPointer(_positionHandle, 3, GL_FLOAT, GL_FALSE, sizeof(LLVertex), 0);
+    glEnableVertexAttribArray(_positionHandle);
+
+    glVertexAttribPointer(_coordHandle, 2, GL_FLOAT, GL_FALSE, sizeof(LLVertex),
+                          (GLvoid *) (sizeof(float) * 7));
+    glEnableVertexAttribArray(_coordHandle);
+
+    glActiveTexture(_textureI);
+    glBindTexture(GL_TEXTURE_2D, (GLuint) _ytid);
+    glUniform1i(_yhandle, _tIindex);
+    checkGlError("_yhandle");
+
+    glActiveTexture(_textureII);
+    glBindTexture(GL_TEXTURE_2D, (GLuint) _utid);
+    glUniform1i(_uhandle, _tIIindex);
+    checkGlError("_uhandle");
+
+    glActiveTexture(_textureIII);
+    glBindTexture(GL_TEXTURE_2D, (GLuint) _vtid);
+    glUniform1i(_vhandle, _tIIIindex);
+    checkGlError("_vhandle");
+
+    glEnableVertexAttribArray(_positionHandle);
+    glEnableVertexAttribArray(_coordHandle);
+    glDrawElements(GL_TRIANGLES, 6, GL_UNSIGNED_BYTE, 0);
+}
